@@ -1,0 +1,245 @@
+name: copr-nightly-4x
+
+# Private nightly for the newest MicroShift 4.y release branch.
+#
+# This is NOT part of the upstream pipeline. It exists because the upstream
+# nightly (copr-nightly.yaml) only builds what @microshift-io publishes, and
+# the 4.y stream needs a COPR project that only a project admin can create.
+# Everything here pushes into a COPR project owned by the fork owner instead,
+# reusing the very same make targets as the upstream workflow.
+#
+# Required repository configuration:
+#   secret COPR_CONFIG     - contents of ~/.config/copr (https://copr.fedorainfracloud.org/api/)
+#   variable COPR_REPO_NAME - e.g. 'myfasuser/microshift-nightly-4x'
+
+on:
+  schedule:
+    # An hour after the upstream nightly, so a fresh OKD payload of the day is
+    # already visible.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      ushift-gitref:
+        description: "MicroShift git ref. Empty: newest release-4.y that has an OKD payload."
+        default: ""
+        type: string
+      okd-version-stream:
+        description: "OKD x.y stream. Empty: derived from the git ref."
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # Resolve which 4.y to build. The newest release branch is not necessarily
+  # buildable: openshift/microshift branches a release before the OKD payload
+  # of that stream exists, and both architectures are needed because
+  # srpm.Containerfile resolves the cross-arch tag of the same stream.
+  setup:
+    if: github.repository == 'mkocustos/microshift'
+    runs-on: ubuntu-24.04
+    outputs:
+      ushift-gitref: ${{ steps.resolve.outputs.ushift-gitref }}
+      okd-version-stream: ${{ steps.resolve.outputs.okd-version-stream }}
+    steps:
+      - name: Check out MicroShift upstream repository
+        uses: actions/checkout@v4
+
+      - name: Verify the COPR project is configured
+        env:
+          COPR_REPO_NAME: ${{ vars.COPR_REPO_NAME }}
+        run: |
+          set -euo pipefail
+          if [ -z "${COPR_REPO_NAME}" ]; then
+            echo "ERROR: repository variable COPR_REPO_NAME is not set" >&2
+            echo "       expected something like 'myfasuser/microshift-nightly-4x'" >&2
+            exit 1
+          fi
+          echo "COPR project: ${COPR_REPO_NAME}"
+
+      - name: Resolve the MicroShift release branch and OKD stream
+        id: resolve
+        shell: bash
+        env:
+          INPUT_GITREF: ${{ inputs.ushift-gitref }}
+          INPUT_STREAM: ${{ inputs.okd-version-stream }}
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y jq
+
+          gitref="${INPUT_GITREF:-}"
+          stream="${INPUT_STREAM:-}"
+
+          has_payload() {
+            local xy="$1"
+            ./src/okd/get_version.sh latest-amd64 "${xy}" >/dev/null 2>&1 && \
+            ./src/okd/get_version.sh latest-arm64 "${xy}" >/dev/null 2>&1
+          }
+
+          if [ -z "${gitref}" ]; then
+            # Highest minor first, so the build follows the release train on its own.
+            mapfile -t branches < <(
+              git ls-remote --heads https://github.com/openshift/microshift.git 'refs/heads/release-4.*' \
+                | awk '{print $2}' | sed 's|refs/heads/||' | sort -t. -k2 -n -r)
+
+            for branch in "${branches[@]}"; do
+              xy="${branch#release-}"
+              echo "Checking OKD payload for ${xy}"
+              if has_payload "${xy}"; then
+                gitref="${branch}"
+                stream="${xy}"
+                break
+              fi
+            done
+          elif [ -z "${stream}" ] && [[ "${gitref}" =~ ^release-([0-9]+\.[0-9]+)$ ]]; then
+            stream="${BASH_REMATCH[1]}"
+          fi
+
+          if [ -z "${gitref}" ] || [ -z "${stream}" ]; then
+            echo "ERROR: no 4.y release branch with a matching OKD payload was found" >&2
+            exit 1
+          fi
+
+          echo "Building ${gitref} against OKD ${stream}"
+          echo "ushift-gitref=${gitref}" >> "${GITHUB_OUTPUT}"
+          echo "okd-version-stream=${stream}" >> "${GITHUB_OUTPUT}"
+
+  # The repo configuration RPM that points at the OpenShift mirror. The CNI
+  # plugins package of the upstream pipeline is deliberately skipped: it is
+  # built for epel-10 only, and Fedora ships containernetworking-plugins itself.
+  build-dependencies-rpm:
+    needs: setup
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out MicroShift upstream repository
+        uses: actions/checkout@v4
+
+      - name: Detect OKD version tag
+        id: detect-okd-version
+        uses: ./.github/actions/okd-version
+        with:
+          stream: ${{ needs.setup.outputs.okd-version-stream }}
+
+      - name: Build dependencies RPM
+        shell: bash
+        env:
+          COPR_CONFIG: |
+            ${{ secrets.COPR_CONFIG }}
+          COPR_REPO_NAME: ${{ vars.COPR_REPO_NAME }}
+        run: |
+          set -euo pipefail
+          echo "${COPR_CONFIG}" > /tmp/copr-config
+
+          make copr-dependencies \
+            OKD_VERSION_TAG=${{ steps.detect-okd-version.outputs.okd-version-tag }} \
+            COPR_REPO_NAME="${COPR_REPO_NAME}" \
+            COPR_CONFIG=/tmp/copr-config
+
+  build-rpms:
+    needs: setup
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out MicroShift upstream repository
+        uses: actions/checkout@v4
+
+      - name: Detect OKD version tag
+        id: detect-okd-version
+        uses: ./.github/actions/okd-version
+        with:
+          stream: ${{ needs.setup.outputs.okd-version-stream }}
+
+      - name: Build SRPM
+        shell: bash
+        env:
+          USHIFT_GITREF: ${{ needs.setup.outputs.ushift-gitref }}
+          OKD_VERSION_STREAM: ${{ needs.setup.outputs.okd-version-stream }}
+        run: |
+          set -euo pipefail
+          make srpm \
+            USHIFT_GITREF="${USHIFT_GITREF}" \
+            OKD_VERSION_TAG=${{ steps.detect-okd-version.outputs.okd-version-tag }} \
+            OKD_VERSION_STREAM="${OKD_VERSION_STREAM}" \
+            SRPM_WORKDIR=/mnt/srpm
+
+      - name: Create copr-cli image and secret
+        shell: bash
+        env:
+          COPR_CONFIG: |
+            ${{ secrets.COPR_CONFIG }}
+        run: |
+          set -euo pipefail
+          echo "${COPR_CONFIG}" > /tmp/copr-config
+
+          make copr-cli
+          make copr-cfg-ensure-podman-secret COPR_CONFIG=/tmp/copr-config
+
+      - name: Create COPR build
+        shell: bash
+        env:
+          COPR_CONFIG: |
+            ${{ secrets.COPR_CONFIG }}
+          COPR_REPO_NAME: ${{ vars.COPR_REPO_NAME }}
+        run: |
+          set -euo pipefail
+          echo "${COPR_CONFIG}" > /tmp/copr-config
+
+          make copr-create-build \
+            SRPM_WORKDIR=/mnt/srpm \
+            COPR_REPO_NAME="${COPR_REPO_NAME}" \
+            COPR_CONFIG=/tmp/copr-config
+
+          make copr-watch-build \
+            SRPM_WORKDIR=/mnt/srpm \
+            COPR_REPO_NAME="${COPR_REPO_NAME}"
+
+      - name: COPR - Regenerate RPM repo
+        shell: bash
+        env:
+          COPR_CONFIG: |
+            ${{ secrets.COPR_CONFIG }}
+          COPR_REPO_NAME: ${{ vars.COPR_REPO_NAME }}
+        run: |
+          set -euo pipefail
+          echo "${COPR_CONFIG}" > /tmp/copr-config
+
+          make copr-regenerate-repos \
+            COPR_CONFIG=/tmp/copr-config \
+            COPR_REPO_NAME="${COPR_REPO_NAME}"
+
+  # Consume the repository the way the target host does: enable it in a clean
+  # Fedora container and let dnf resolve the whole package set. Dependency
+  # breakage against the OpenShift mirror is the realistic failure mode here,
+  # and it shows up before the host runs 'dnf upgrade'.
+  verify-repo:
+    needs: [setup, build-dependencies-rpm, build-rpms]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install the RPMs from COPR in a Fedora container
+        shell: bash
+        env:
+          COPR_REPO_NAME: ${{ vars.COPR_REPO_NAME }}
+          OKD_VERSION_STREAM: ${{ needs.setup.outputs.okd-version-stream }}
+        run: |
+          set -euo pipefail
+          for release in 43 44; do
+            echo "### Fedora ${release}"
+            podman run --rm \
+              --env COPR_REPO_NAME="${COPR_REPO_NAME}" \
+              --env OKD_VERSION_STREAM="${OKD_VERSION_STREAM}" \
+              "quay.io/fedora/fedora:${release}" bash -euxo pipefail -c '
+                dnf install -y dnf-plugins-core
+                dnf copr enable -y "${COPR_REPO_NAME}"
+                dnf install -y microshift-io-dependencies
+
+                # The newest MicroShift in the repository must belong to the
+                # stream that was just built, not to a leftover of another one.
+                version="$(dnf repoquery --queryformat "%{version}" --latest-limit 1 microshift)"
+                echo "microshift in the repository: ${version}"
+                [[ "${version}" == "${OKD_VERSION_STREAM}."* ]]
+
+                # Resolve and download the full package set without running the
+                # scriptlets, which need a real system.
+                dnf install -y --downloadonly microshift microshift-greenboot microshift-selinux
+              '
+          done
