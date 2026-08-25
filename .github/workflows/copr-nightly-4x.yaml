@@ -224,7 +224,7 @@ jobs:
           set -euo pipefail
           for release in 43 44; do
             echo "### Fedora ${release}"
-            podman run --rm \
+            sudo podman run --rm \
               --env COPR_REPO_NAME="${COPR_REPO_NAME}" \
               --env OKD_VERSION_STREAM="${OKD_VERSION_STREAM}" \
               "quay.io/fedora/fedora:${release}" bash -euxo pipefail -c '
