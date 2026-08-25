@@ -234,7 +234,9 @@ jobs:
 
                 # The newest MicroShift in the repository must belong to the
                 # stream that was just built, not to a leftover of another one.
-                version="$(dnf repoquery --queryformat "%{version}" --latest-limit 1 microshift)"
+                version="$(dnf repoquery --queryformat "%{version}\n" \
+                              --disablerepo="*" --enablerepo="*microshift-nightly*" microshift \
+                            | sort -V | tail -1)"
                 echo "microshift in the repository: ${version}"
                 [[ "${version}" == "${OKD_VERSION_STREAM}."* ]]
 
