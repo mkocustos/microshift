@@ -101,3 +101,40 @@ The default target registry for publishing OKD container image artifacts is
 If the build job finishes successfully, the available container images can be listed
 at [Packages](https://github.com/microshift-io/microshift/packages) and pulled from
 the `ghcr.io/microshift-io` registry.
+
+#### Private 4.y Nightly
+
+> Note: This workflow (`copr-nightly-4x.yaml`) is not part of the upstream
+> pipeline. It exists because the upstream nightly only builds what
+> @microshift-io publishes, while a 4.y stream needs a COPR project that only a
+> project admin can create. It pushes into a COPR project owned by the fork owner
+> instead, reusing the very same make targets.
+
+The workflow builds the newest `release-4.y` branch of MicroShift for which an
+OKD payload exists on both architectures, every day at 02:00 UTC. Two behaviours
+differ from the upstream nightly on purpose.
+
+**The OKD payload is resolved from amd64.** The `okd-version` action queries the
+self-built arm64 mirror by default, because that mirror is normally the limiting
+factor and pinning both architectures to the same tag keeps them consistent. That
+breaks down for a *pinned release stream*: the mirror follows the newest OKD
+stream and stops rebuilding a stream once it has branched, so 4.22 ends there at
+`ec.16` (8 May 2026) while quay.io has published releases well past it. Since
+`get_version.sh` prefers released tags and finds none, it falls back to that old
+EC indefinitely. The workflow therefore passes `check-amd64: "true"`.
+
+This is only sound because the target COPR project has x86_64 chroots
+exclusively — no aarch64 RPM is ever produced whose single version string would
+then name a payload it does not contain. Upstream must not copy this; see
+[microshift-io/microshift#237](https://github.com/microshift-io/microshift/pull/237)
+for the change that removes the need for the flag altogether.
+
+**Unchanged input means no build.** A release branch build carries no timestamp
+in its version, so the same commit built against the same payload produces an
+identical NVR. The `setup` job queries the COPR API for a successful build
+matching the branch tip and the resolved payload, and skips the build jobs when
+it finds one. The `verify-repo` job still runs on those days: it checks the
+published repository against the OpenShift mirror, which is exactly what is worth
+knowing when nothing was rebuilt.
+
+A `workflow_dispatch` run accepts `force: true` to build anyway.

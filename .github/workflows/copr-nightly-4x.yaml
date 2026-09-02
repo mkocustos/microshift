@@ -27,6 +27,10 @@ on:
         description: "OKD x.y stream. Empty: derived from the git ref."
         default: ""
         type: string
+      force:
+        description: "Build even if this commit and OKD payload were already built."
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -42,6 +46,8 @@ jobs:
     outputs:
       ushift-gitref: ${{ steps.resolve.outputs.ushift-gitref }}
       okd-version-stream: ${{ steps.resolve.outputs.okd-version-stream }}
+      okd-version-tag: ${{ steps.detect-okd-version.outputs.okd-version-tag }}
+      should-build: ${{ steps.guard.outputs.should-build }}
     steps:
       - name: Check out MicroShift upstream repository
         uses: actions/checkout@v4
@@ -101,25 +107,92 @@ jobs:
             exit 1
           fi
 
-          echo "Building ${gitref} against OKD ${stream}"
+          # The commit is what the duplicate-build guard keys on, so resolve it
+          # here rather than letting a later job race against a new push.
+          sha="$(git ls-remote https://github.com/openshift/microshift.git \
+                   "refs/heads/${gitref}" | cut -f1)"
+          if [ -z "${sha}" ]; then
+            echo "ERROR: could not resolve the tip of ${gitref}" >&2
+            exit 1
+          fi
+
+          echo "Building ${gitref} (${sha}) against OKD ${stream}"
           echo "ushift-gitref=${gitref}" >> "${GITHUB_OUTPUT}"
           echo "okd-version-stream=${stream}" >> "${GITHUB_OUTPUT}"
+          echo "ushift-sha=${sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Detect OKD version tag
+        id: detect-okd-version
+        uses: ./.github/actions/okd-version
+        with:
+          # amd64 rather than the action's arm64 default. The self-built arm64
+          # mirror never publishes GA tags for a branched stream - 4.22 ends
+          # there at ec.16 (8 May 2026) - so the "prefer released tags" rule in
+          # get_version.sh finds nothing and pins that old EC indefinitely.
+          #
+          # Only sound because this COPR project has x86_64 chroots exclusively:
+          # no aarch64 RPM is ever produced whose single version string would
+          # then name a payload it does not actually contain. Upstream must NOT
+          # copy this - see microshift-io/microshift#237 for the proper fix.
+          check-amd64: "true"
+          stream: ${{ steps.resolve.outputs.okd-version-stream }}
+
+      - name: Decide whether anything changed
+        id: guard
+        shell: bash
+        env:
+          COPR_REPO_NAME: ${{ vars.COPR_REPO_NAME }}
+          USHIFT_SHA: ${{ steps.resolve.outputs.ushift-sha }}
+          OKD_VERSION_TAG: ${{ steps.detect-okd-version.outputs.okd-version-tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          if [ "${FORCE}" = "true" ]; then
+            echo "Forced through workflow_dispatch."
+            echo "should-build=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          # A release branch carries no build timestamp in its version, so the
+          # same commit against the same payload produces the very same NVR.
+          # Skip rather than push a duplicate build into COPR.
+          owner="${COPR_REPO_NAME%%/*}"
+          project="${COPR_REPO_NAME##*/}"
+          # git rev-parse --short picks 7-10 characters depending on repository
+          # size, so match the short sha as a substring instead of guessing it.
+          needle_sha="_g${USHIFT_SHA:0:7}"
+          needle_okd="_${OKD_VERSION_TAG//-/_}"
+
+          # COPR reports the version NVR-style as "<version>-<rpm release>", so
+          # the release suffix has to come off before matching the payload.
+          hits="$(curl -fsSL --retry 3 \
+                    "https://copr.fedorainfracloud.org/api_3/build/list/?ownername=${owner}&projectname=${project}" \
+                  | jq -r --arg sha "${needle_sha}" --arg okd "${needle_okd}" \
+                      '[.items[]
+                        | select(.state == "succeeded")
+                        | .source_package.version // ""
+                        | sub("-[0-9]+$"; "")
+                        | select(contains($sha) and endswith($okd))] | length')"
+
+          echo "Looking for a succeeded build matching *${needle_sha}* ending in ${needle_okd}: ${hits} found"
+          if [ "${hits}" -gt 0 ]; then
+            echo "Nothing changed since the last successful build - skipping."
+            echo "should-build=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "should-build=true" >> "${GITHUB_OUTPUT}"
+          fi
 
   # The repo configuration RPM that points at the OpenShift mirror. The CNI
   # plugins package of the upstream pipeline is deliberately skipped: it is
   # built for epel-10 only, and Fedora ships containernetworking-plugins itself.
   build-dependencies-rpm:
     needs: setup
+    if: ${{ needs.setup.outputs.should-build == 'true' }}
     runs-on: ubuntu-24.04
     steps:
       - name: Check out MicroShift upstream repository
         uses: actions/checkout@v4
-
-      - name: Detect OKD version tag
-        id: detect-okd-version
-        uses: ./.github/actions/okd-version
-        with:
-          stream: ${{ needs.setup.outputs.okd-version-stream }}
 
       - name: Build dependencies RPM
         shell: bash
@@ -132,22 +205,17 @@ jobs:
           echo "${COPR_CONFIG}" > /tmp/copr-config
 
           make copr-dependencies \
-            OKD_VERSION_TAG=${{ steps.detect-okd-version.outputs.okd-version-tag }} \
+            OKD_VERSION_TAG=${{ needs.setup.outputs.okd-version-tag }} \
             COPR_REPO_NAME="${COPR_REPO_NAME}" \
             COPR_CONFIG=/tmp/copr-config
 
   build-rpms:
     needs: setup
+    if: ${{ needs.setup.outputs.should-build == 'true' }}
     runs-on: ubuntu-24.04
     steps:
       - name: Check out MicroShift upstream repository
         uses: actions/checkout@v4
-
-      - name: Detect OKD version tag
-        id: detect-okd-version
-        uses: ./.github/actions/okd-version
-        with:
-          stream: ${{ needs.setup.outputs.okd-version-stream }}
 
       - name: Build SRPM
         shell: bash
@@ -158,7 +226,7 @@ jobs:
           set -euo pipefail
           make srpm \
             USHIFT_GITREF="${USHIFT_GITREF}" \
-            OKD_VERSION_TAG=${{ steps.detect-okd-version.outputs.okd-version-tag }} \
+            OKD_VERSION_TAG=${{ needs.setup.outputs.okd-version-tag }} \
             OKD_VERSION_STREAM="${OKD_VERSION_STREAM}" \
             SRPM_WORKDIR=/mnt/srpm
 
@@ -213,6 +281,11 @@ jobs:
   # and it shows up before the host runs 'dnf upgrade'.
   verify-repo:
     needs: [setup, build-dependencies-rpm, build-rpms]
+    # Runs on skip days too: it checks the published repository against the
+    # OpenShift mirror, which is exactly when nothing was rebuilt.
+    if: ${{ !cancelled() && needs.setup.result == 'success'
+            && needs.build-rpms.result != 'failure'
+            && needs.build-dependencies-rpm.result != 'failure' }}
     runs-on: ubuntu-24.04
     steps:
       - name: Install the RPMs from COPR in a Fedora container
