@@ -48,12 +48,34 @@ SOURCE_GIT_COMMIT="$(git rev-parse --short 'HEAD^{commit}')"
 if [[ $(git tag -l "${USHIFT_GITREF}") ]]; then
     MICROSHIFT_VERSION="${USHIFT_GITREF}"
 else
-    MICROSHIFT_VERSION="$(awk -F'[=.-]' '{print $2 "." $3 "." $4}' Makefile.version.aarch64.var | sed -e 's/ //g')"
-    # After the X.Y.Z, add build timestamp for correct ordering of the RPMs based on the version.
-    # BUILD_TIMESTAMP can be set externally to ensure identical versions across parallel builds.
-    MICROSHIFT_VERSION="${MICROSHIFT_VERSION}-${BUILD_TIMESTAMP:-$(date -u +%Y%m%d%H%M)}"
+    # Makefile.version.*.var only carries the OCP base version and is always
+    # X.Y.0, so it cannot express which MicroShift release the branch tip is
+    # ahead of. The nearest release tag can.
+    XYZ_FROM_VAR="$(awk -F'[=.-]' '{print $2 "." $3 "." $4}' Makefile.version.aarch64.var | sed -e 's/ //g')"
+    # --long keeps the counter even when HEAD is exactly a tag ("<tag>-0-g<sha>");
+    # without it the version would go backwards on the day a release is cut.
+    DESCRIBE="$(git describe --tags --long \
+                  --match '[0-9]*.[0-9]*.[0-9]*-*' \
+                  --exclude '*-ec*' --exclude '*-rc*' 2>/dev/null || true)"
+    # "<tag>-<count>-g<sha>", and the tag itself contains dashes:
+    #   4.22.7-202607240848.p0-29-gef322212c
+    REST="${DESCRIBE%-*}"
+    COUNT="${REST##*-}"
+    NEAREST_XYZ="${REST%-*}"
+    NEAREST_XYZ="${NEAREST_XYZ%%-*}"
+    # Only trust the tag when it belongs to the stream this branch builds. On
+    # main the nearest release tag comes from an older stream, and describing
+    # 5.1.0 as "4.14.0 plus 6772 commits" would be worse than saying nothing.
+    if [[ -n "${DESCRIBE}" && "${NEAREST_XYZ%.*}" == "${XYZ_FROM_VAR%.*}" ]]; then
+        MICROSHIFT_VERSION="${NEAREST_XYZ}-${COUNT}"
+    else
+        # After the X.Y.Z, add build timestamp for correct ordering of the RPMs based on the version.
+        # BUILD_TIMESTAMP can be set externally to ensure identical versions across parallel builds.
+        MICROSHIFT_VERSION="${XYZ_FROM_VAR}-${BUILD_TIMESTAMP:-$(date -u +%Y%m%d%H%M)}"
+    fi
 fi
 # Example results:
+# - 4.22.7-29-gef322212c_4.22.0_okd_scos.9                for build against a release branch, 29 commits past 4.22.7.
 # - 4.21.0-202511271015-ga9cd00b34_4.21.0_okd_scos.ec.5   for build against HEAD of main which was 4.21 at the time.
 # - 4.20.0-202510201126.p0-g1c4675ace_4.20.0-okd-scos.6   for build against a specific tag.
 MICROSHIFT_VERSION="${MICROSHIFT_VERSION}-g${SOURCE_GIT_COMMIT}-${OKD_VERSION_TAG}"
