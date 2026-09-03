@@ -51,6 +51,10 @@ jobs:
     steps:
       - name: Check out MicroShift upstream repository
         uses: actions/checkout@v4
+        with:
+          # The guard dates the newest packaging commit, so it needs history
+          # rather than the default single-commit checkout.
+          fetch-depth: 0
 
       - name: Verify the COPR project is configured
         env:
@@ -166,21 +170,34 @@ jobs:
 
           # COPR reports the version NVR-style as "<version>-<rpm release>", so
           # the release suffix has to come off before matching the payload.
-          hits="$(curl -fsSL --retry 3 \
+          last="$(curl -fsSL --retry 3 \
                     "https://copr.fedorainfracloud.org/api_3/build/list/?ownername=${owner}&projectname=${project}" \
                   | jq -r --arg sha "${needle_sha}" --arg okd "${needle_okd}" \
                       '[.items[]
                         | select(.state == "succeeded")
-                        | .source_package.version // ""
-                        | sub("-[0-9]+$"; "")
-                        | select(contains($sha) and endswith($okd))] | length')"
+                        | select((((.source_package.version // "") | sub("-[0-9]+$"; "")) as $v
+                                  | ($v | contains($sha)) and ($v | endswith($okd))))
+                        | .submitted_on]
+                       | if length == 0 then 0 else max end')"
 
-          echo "Looking for a succeeded build matching *${needle_sha}* ending in ${needle_okd}: ${hits} found"
-          if [ "${hits}" -gt 0 ]; then
+          echo "Newest succeeded build matching *${needle_sha}* ending in ${needle_okd}: ${last}"
+          if [ "${last}" -eq 0 ]; then
+            echo "should-build=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          # The NVR only encodes the upstream commit and the OKD payload. The
+          # kindnet and topolvm assets, the spec files and the Containerfile all
+          # live in THIS repo and are packaged into the same NVR, so a change to
+          # them is invisible to the match above -- a kindnet digest bump was
+          # silently skipped that way. Compare timestamps as well.
+          src_ts="$(git log -1 --format=%ct -- src/ packaging/ Makefile)"
+          if [ -n "${src_ts}" ] && [ "${src_ts}" -gt "${last}" ]; then
+            echo "Packaging inputs changed at $(date -u -d "@${src_ts}" +%FT%TZ), after that build - rebuilding."
+            echo "should-build=true" >> "${GITHUB_OUTPUT}"
+          else
             echo "Nothing changed since the last successful build - skipping."
             echo "should-build=false" >> "${GITHUB_OUTPUT}"
-          else
-            echo "should-build=true" >> "${GITHUB_OUTPUT}"
           fi
 
   # The repo configuration RPM that points at the OpenShift mirror. The CNI
