@@ -54,6 +54,114 @@ All manifests generated successfully!
 =========================================
 ```
 
+## Pod Network
+
+Kindnet and Kube-proxy have to agree with MicroShift's `network.clusterNetwork`
+setting, which defaults to `10.42.0.0/16`.
+
+- **Kindnet** reads its pod subnet from the `podSubnet` key of the
+  `kindnet-config` ConfigMap in the `kube-kindnet` namespace. Kindnet masquerades
+  traffic to every destination outside this range. If the value does not match
+  the cluster network, connections into pods are masqueraded as well, and pods
+  such as the router see the node's address on the pod network instead of the
+  client address.
+- **Kube-proxy** needs no CIDR. It recognises pod traffic by the node's
+  `spec.podCIDRs` (`detectLocalMode: NodeCIDR`), which MicroShift allocates from
+  `clusterNetwork`.
+
+### Using a Different Cluster Network
+
+The packaged `kindnet-config` ConfigMap carries the default. For a cluster with
+a different `network.clusterNetwork`, set `podSubnet` to the same value; for a
+dual-stack cluster, separate both CIDRs with a comma.
+
+Do not add a second `kindnet-config` ConfigMap somewhere in
+`manifests.kustomizePaths`. MicroShift applies the kustomization paths one after
+another on every start, so the packaged manifest resets `podSubnet` to the
+default before the override is applied again. A kindnet pod that starts in
+between, typically after a reboot, keeps the default and masquerades traffic
+into the pods. The value has to be written in one place only:
+
+- **Image mode (bootc) or container:** replace
+  `/usr/lib/microshift/manifests.d/000-microshift-kindnet/00-kindnet-config.yaml`
+  in a derived image, or bind-mount a replacement file.
+- **Package installation:** take the packaged kindnet kustomization out of
+  `manifests.kustomizePaths` and apply it through an overlay that patches only
+  the pod subnet, as shown below.
+
+`/etc/microshift/config.d/10-kindnet-pod-subnet.yaml`:
+
+```yaml
+network:
+  clusterNetwork:
+    - 10.100.0.0/16
+manifests:
+  kustomizePaths:
+    - /usr/lib/microshift/manifests
+    # Every packaged directory except 000-microshift-kindnet, one by one.
+    # See the first caveat below.
+    - /usr/lib/microshift/manifests.d/000-microshift-kube-proxy
+    - /etc/microshift/manifests
+    - /etc/microshift/manifests.d/*
+```
+
+`/etc/microshift/manifests.d/010-kindnet-pod-subnet/kustomization.yaml`:
+
+```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  # kustomize does not accept an absolute path here
+  - ../../../../usr/lib/microshift/manifests.d/000-microshift-kindnet
+patches:
+  - patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: kindnet-config
+        namespace: kube-kindnet
+      data:
+        podSubnet: 10.100.0.0/16
+```
+
+The overlay builds on the installed package, so updates of the kindnetd image
+or the DaemonSet are picked up without touching it. If a future package renames
+the ConfigMap or its key, the patch fails and MicroShift logs the failed
+kustomization instead of applying a wrong value.
+
+> [!IMPORTANT]
+> **Caveats of the package installation variant**
+>
+> - **Packages installed later are not applied.** The glob
+>   `/usr/lib/microshift/manifests.d/*` cannot exclude a single directory, so
+>   the list names every packaged directory explicitly. A package installed
+>   later, for example `microshift-topolvm`, `microshift-olm` or
+>   `microshift-gateway-api`, places its manifests in
+>   `/usr/lib/microshift/manifests.d`, but MicroShift does not apply them
+>   until the directory is added to the list. Nothing reports this. After
+>   installing or removing packages, compare
+>   `ls /usr/lib/microshift/manifests.d` with the list in
+>   `microshift show-config`.
+> - **A changed value needs a restart of kindnet.** kindnetd reads the value
+>   only when it starts, and the DaemonSet itself does not change. After
+>   switching an existing cluster to the overlay, or changing the value later,
+>   run `oc rollout restart daemonset/kube-kindnet-ds -n kube-kindnet`.
+> - **The relative path depends on where the overlay lives.** From
+>   `/etc/microshift/manifests.d/<name>/` it takes four `../`.
+> - **Delete manifests follow the list.** MicroShift looks for delete
+>   manifests next to each kustomization path: in
+>   `/usr/lib/microshift/manifests.d/delete/*` for the glob, but in
+>   `<directory>/delete` for a directory that is listed explicitly.
+> - **Multi-node clusters:** keep the drop-in and the overlay identical on all
+>   nodes, so that no node applies a different value.
+
+To check the value kindnet actually uses:
+
+```bash
+oc get configmap kindnet-config -n kube-kindnet -o jsonpath='{.data.podSubnet}'
+sudo iptables -t nat -S KIND-MASQ-AGENT   # expects a RETURN rule for the pod subnet
+```
+
 ## Updating Image References
 
 The script automatically fetches the latest images from upstream:
