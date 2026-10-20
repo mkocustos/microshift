@@ -312,7 +312,7 @@ jobs:
           OKD_VERSION_STREAM: ${{ needs.setup.outputs.okd-version-stream }}
         run: |
           set -euo pipefail
-          for release in 43 44; do
+          for release in 44; do
             echo "### Fedora ${release}"
             sudo podman run --rm \
               --env COPR_REPO_NAME="${COPR_REPO_NAME}" \
