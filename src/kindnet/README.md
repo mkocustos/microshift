@@ -170,6 +170,14 @@ The script automatically fetches the latest images from upstream:
 
 To update to a new version, simply re-run the generation script.
 
+> [!NOTE]
+> In the mkocustos fork the kindnetd pin is maintained by Renovate
+> (`renovate.json`): the image references stay digest-only (multi-arch index;
+> skopeo and CRI-O reject `tag@digest`), the tag sits in a `# renovate: tag=`
+> comment of the kustomizations and in `release.base` of the release JSON
+> files, and a version bump arrives as a pull request without automerge. Re-running the generation script would overwrite the
+> fork's own kindnet changes; bump the image through Renovate instead.
+
 Image digests are stored in release JSON files after generation:
 - `src/kindnet/assets/kindnet/release-kindnet-{aarch64,x86_64}.json`
 - `src/kindnet/assets/kube-proxy/release-kube-proxy-{aarch64,x86_64}.json`
