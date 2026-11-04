@@ -31,7 +31,10 @@ echo "microshift in the repository: ${version}"
 # which need a real system.
 pkgs=(microshift microshift-greenboot microshift-selinux microshift-kindnet
       microshift-release-info microshift-kindnet-release-info)
-dnf install -y --downloadonly --destdir /tmp/rpms "${pkgs[@]/%/-${version}}"
+# dnf5 knows --destdir only for 'download', so resolve first, then fetch the
+# packages themselves for inspection.
+dnf install -y --downloadonly "${pkgs[@]/%/-${version}}"
+dnf download --destdir /tmp/rpms "${pkgs[@]/%/-${version}}"
 
 mkdir /tmp/x
 cd /tmp/x
