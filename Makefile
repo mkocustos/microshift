@@ -10,10 +10,16 @@ USHIFT_GITREF ?= main
 # Optional OKD x.y stream (e.g. '4.22') to build against. Empty means latest,
 # which is what main is built with. Release branches must pin their stream.
 OKD_VERSION_STREAM ?=
+# Optional OpenShift release (e.g. '4.22.20'). When set, the SRPM embeds the
+# images of the official OpenShift payload instead of OKD.
+OCP_VERSION ?=
+# OKD tag detection only without OCP_VERSION; with it, OKD is not used.
+ifeq ($(OCP_VERSION),)
 ifeq ($(ARCH),aarch64)
 OKD_VERSION_TAG ?= $$(./src/okd/get_version.sh latest-arm64 "$(OKD_VERSION_STREAM)")
 else
 OKD_VERSION_TAG ?= $$(./src/okd/get_version.sh latest-amd64 "$(OKD_VERSION_STREAM)")
+endif
 endif
 RPM_OUTDIR ?=
 SRPM_WORKDIR ?=
@@ -103,6 +109,7 @@ srpm:
         --build-arg USHIFT_GITREF="${USHIFT_GITREF}" \
         --build-arg OKD_VERSION_TAG="${OKD_VERSION_TAG}" \
         --build-arg OKD_VERSION_STREAM="${OKD_VERSION_STREAM}" \
+        --build-arg OCP_VERSION="${OCP_VERSION}" \
         --build-arg OKD_RELEASE_IMAGE_X86_64="${OKD_RELEASE_IMAGE_X86_64}" \
         --build-arg OKD_RELEASE_IMAGE_AARCH64="${OKD_RELEASE_IMAGE_AARCH64}" \
         --build-arg VG_NAME="${VG_NAME}" \
