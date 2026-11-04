@@ -1,0 +1,303 @@
+name: copr-stable
+
+# Private build of the newest MicroShift release of one OpenShift stable
+# channel, with the component images of the official OpenShift payload.
+#
+# This is NOT part of the upstream pipeline. It follows what Red Hat ships as
+# MicroShift as closely as a community build can: the openshift/microshift
+# release tag of the newest version in the stable channel, built against the
+# release payload of exactly that version. The payload metadata is public, so
+# the build needs no Red Hat credentials. Pulling the component images does:
+# the target host needs a pull secret in /etc/crio/openshift-pull-secret.
+#
+# Moving to the next minor (e.g. 4.23) is a deliberate manual change of
+# OCP_CHANNEL below, never automatic.
+#
+# Required repository configuration:
+#   secret COPR_CONFIG             - contents of ~/.config/copr (https://copr.fedorainfracloud.org/api/)
+#   variable COPR_STABLE_REPO_NAME - e.g. 'myfasuser/microshift-stable'
+
+on:
+  schedule:
+    # The channel moves a few times a month at most; once a day is plenty.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      ocp-version:
+        description: "OpenShift version (e.g. 4.22.20). Empty: newest in the stable channel."
+        default: ""
+        type: string
+      force:
+        description: "Build even if this version was already built."
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  OCP_CHANNEL: stable-4.22
+
+jobs:
+  setup:
+    if: github.repository == 'mkocustos/microshift'
+    runs-on: ubuntu-24.04
+    outputs:
+      ocp-version: ${{ steps.resolve.outputs.ocp-version }}
+      ushift-gitref: ${{ steps.resolve.outputs.ushift-gitref }}
+      should-build: ${{ steps.guard.outputs.should-build }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          # The guard dates the newest packaging commit, so it needs history.
+          fetch-depth: 0
+
+      - name: Verify the COPR project is configured
+        env:
+          COPR_REPO_NAME: ${{ vars.COPR_STABLE_REPO_NAME }}
+        run: |
+          set -euo pipefail
+          if [ -z "${COPR_REPO_NAME}" ]; then
+            echo "ERROR: repository variable COPR_STABLE_REPO_NAME is not set" >&2
+            exit 1
+          fi
+          echo "COPR project: ${COPR_REPO_NAME}"
+
+      - name: Resolve the OpenShift version and the MicroShift release tag
+        id: resolve
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.ocp-version }}
+        run: |
+          set -euo pipefail
+
+          version="${INPUT_VERSION:-}"
+          if [ -z "${version}" ]; then
+            # The same graph the OpenShift update service serves to clusters.
+            version="$(curl -fsSL --retry 3 -H 'Accept: application/json' \
+                         "https://api.openshift.com/api/upgrades_info/v1/graph?channel=${OCP_CHANNEL}&arch=amd64" \
+                       | jq -r '.nodes[].version' | sort -V | tail -1)"
+          fi
+          if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: no usable version in ${OCP_CHANNEL}: '${version}'" >&2
+            exit 1
+          fi
+
+          # Both architectures must exist, the SRPM embeds the images of both.
+          for arch in x86_64 aarch64; do
+            if ! skopeo inspect --raw "docker://quay.io/openshift-release-dev/ocp-release:${version}-${arch}" >/dev/null; then
+              echo "ERROR: no OpenShift release payload ${version}-${arch}" >&2
+              exit 1
+            fi
+          done
+
+          # openshift/microshift tags every release as <x.y.z>-<timestamp>.p<n>.
+          # A respin of the same version gets a higher p<n> or timestamp.
+          tag="$(git ls-remote --tags --refs https://github.com/openshift/microshift.git "refs/tags/${version}-*" \
+                   | awk '{print $2}' | sed 's|refs/tags/||' \
+                   | grep -E "^${version//./\\.}-[0-9]+\.p[0-9]+$" \
+                   | sort -V | tail -1 || true)"
+          if [ -z "${tag}" ]; then
+            echo "ERROR: no openshift/microshift release tag for ${version}" >&2
+            exit 1
+          fi
+
+          echo "Building MicroShift ${tag} against OpenShift ${version}"
+          echo "ocp-version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "ushift-gitref=${tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Decide whether anything changed
+        id: guard
+        shell: bash
+        env:
+          COPR_REPO_NAME: ${{ vars.COPR_STABLE_REPO_NAME }}
+          OCP_VERSION: ${{ steps.resolve.outputs.ocp-version }}
+          USHIFT_GITREF: ${{ steps.resolve.outputs.ushift-gitref }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          if [ "${FORCE}" = "true" ]; then
+            echo "Forced through workflow_dispatch."
+            echo "should-build=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          # A tag build has no timestamp of its own in the version, so the same
+          # tag against the same payload gives the same NVR. Skip duplicates.
+          owner="${COPR_REPO_NAME%%/*}"
+          project="${COPR_REPO_NAME##*/}"
+          needle_tag="${USHIFT_GITREF//-/_}_g"
+          needle_ocp="_ocp_${OCP_VERSION}"
+
+          last="$(curl -fsSL --retry 3 \
+                    "https://copr.fedorainfracloud.org/api_3/build/list/?ownername=${owner}&projectname=${project}" \
+                  | jq -r --arg tag "${needle_tag}" --arg ocp "${needle_ocp}" \
+                      '[.items[]
+                        | select(.state == "succeeded")
+                        | select((((.source_package.version // "") | sub("-[0-9]+$"; "")) as $v
+                                  | ($v | startswith($tag)) and ($v | endswith($ocp))))
+                        | .submitted_on]
+                       | if length == 0 then 0 else max end')"
+
+          echo "Newest succeeded build of ${USHIFT_GITREF} / ${OCP_VERSION}: ${last}"
+          if [ "${last}" -eq 0 ]; then
+            echo "should-build=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          # Packaging inputs of THIS repo end up in the same NVR, so a change to
+          # them has to trigger a rebuild on its own.
+          src_ts="$(git log -1 --format=%ct -- src/ packaging/ Makefile)"
+          if [ -n "${src_ts}" ] && [ "${src_ts}" -gt "${last}" ]; then
+            echo "Packaging inputs changed at $(date -u -d "@${src_ts}" +%FT%TZ), after that build - rebuilding."
+            echo "should-build=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Nothing changed since the last successful build - skipping."
+            echo "should-build=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+  # The repo configuration RPM that points at the OpenShift mirror. Only the
+  # x.y part of the version is used. The CNI plugins package of the upstream
+  # pipeline is skipped: Fedora ships containernetworking-plugins itself.
+  build-dependencies-rpm:
+    needs: setup
+    if: ${{ needs.setup.outputs.should-build == 'true' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build dependencies RPM
+        shell: bash
+        env:
+          COPR_CONFIG: |
+            ${{ secrets.COPR_CONFIG }}
+          COPR_REPO_NAME: ${{ vars.COPR_STABLE_REPO_NAME }}
+          OCP_VERSION: ${{ needs.setup.outputs.ocp-version }}
+        run: |
+          set -euo pipefail
+          echo "${COPR_CONFIG}" > /tmp/copr-config
+
+          make copr-dependencies \
+            OKD_VERSION_TAG="${OCP_VERSION}" \
+            COPR_REPO_NAME="${COPR_REPO_NAME}" \
+            COPR_CONFIG=/tmp/copr-config
+
+  build-rpms:
+    needs: setup
+    if: ${{ needs.setup.outputs.should-build == 'true' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build SRPM
+        shell: bash
+        env:
+          USHIFT_GITREF: ${{ needs.setup.outputs.ushift-gitref }}
+          OCP_VERSION: ${{ needs.setup.outputs.ocp-version }}
+        run: |
+          set -euo pipefail
+          # OKD_VERSION_TAG is ignored with OCP_VERSION set. Passing a value
+          # keeps the Makefile from querying OKD tags for nothing.
+          make srpm \
+            USHIFT_GITREF="${USHIFT_GITREF}" \
+            OCP_VERSION="${OCP_VERSION}" \
+            OKD_VERSION_TAG=unused \
+            SRPM_WORKDIR=/mnt/srpm
+
+      - name: Create copr-cli image and secret
+        shell: bash
+        env:
+          COPR_CONFIG: |
+            ${{ secrets.COPR_CONFIG }}
+        run: |
+          set -euo pipefail
+          echo "${COPR_CONFIG}" > /tmp/copr-config
+
+          make copr-cli
+          make copr-cfg-ensure-podman-secret COPR_CONFIG=/tmp/copr-config
+
+      - name: Create COPR build
+        shell: bash
+        env:
+          COPR_CONFIG: |
+            ${{ secrets.COPR_CONFIG }}
+          COPR_REPO_NAME: ${{ vars.COPR_STABLE_REPO_NAME }}
+        run: |
+          set -euo pipefail
+          echo "${COPR_CONFIG}" > /tmp/copr-config
+
+          make copr-create-build \
+            SRPM_WORKDIR=/mnt/srpm \
+            COPR_REPO_NAME="${COPR_REPO_NAME}" \
+            COPR_CONFIG=/tmp/copr-config
+
+          make copr-watch-build \
+            SRPM_WORKDIR=/mnt/srpm \
+            COPR_REPO_NAME="${COPR_REPO_NAME}"
+
+      - name: COPR - Regenerate RPM repo
+        shell: bash
+        env:
+          COPR_CONFIG: |
+            ${{ secrets.COPR_CONFIG }}
+          COPR_REPO_NAME: ${{ vars.COPR_STABLE_REPO_NAME }}
+        run: |
+          set -euo pipefail
+          echo "${COPR_CONFIG}" > /tmp/copr-config
+
+          make copr-regenerate-repos \
+            COPR_CONFIG=/tmp/copr-config \
+            COPR_REPO_NAME="${COPR_REPO_NAME}"
+
+  # Consume the repository the way the target host does, and check that the
+  # packages really carry the OpenShift images and no OKD leftovers.
+  verify-repo:
+    needs: [setup, build-dependencies-rpm, build-rpms]
+    if: ${{ !cancelled() && needs.setup.result == 'success'
+            && needs.build-rpms.result != 'failure'
+            && needs.build-dependencies-rpm.result != 'failure' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install the RPMs from COPR in a Fedora container
+        shell: bash
+        env:
+          COPR_REPO_NAME: ${{ vars.COPR_STABLE_REPO_NAME }}
+          OCP_VERSION: ${{ needs.setup.outputs.ocp-version }}
+        run: |
+          set -euo pipefail
+          for release in 44; do
+            echo "### Fedora ${release}"
+            sudo podman run --rm \
+              --env COPR_REPO_NAME="${COPR_REPO_NAME}" \
+              --env OCP_VERSION="${OCP_VERSION}" \
+              "quay.io/fedora/fedora:${release}" bash -euxo pipefail -c '
+                dnf install -y dnf-plugins-core cpio
+                dnf copr enable -y "${COPR_REPO_NAME}"
+                dnf install -y microshift-io-dependencies
+
+                version="$(dnf repoquery --queryformat "%{version}\n" \
+                              --disablerepo="*" --enablerepo="*microshift-stable*" microshift \
+                            | sort -V | tail -1)"
+                echo "microshift in the repository: ${version}"
+                [[ "${version}" == "${OCP_VERSION}_"* ]]
+                [[ "${version}" == *"_ocp_${OCP_VERSION}" ]]
+
+                dnf install -y --downloadonly --destdir /tmp/rpms \
+                  microshift microshift-greenboot microshift-selinux microshift-kindnet
+
+                # The binary and the kindnet manifests embed the image digests.
+                mkdir /tmp/x && cd /tmp/x
+                for rpm in /tmp/rpms/microshift-[0-9]*.rpm /tmp/rpms/microshift-kindnet-[0-9]*.rpm; do
+                  rpm2cpio "${rpm}" | cpio -idm --quiet
+                done
+                if grep -ra -l "quay.io/okd/" . ; then
+                  echo "ERROR: OKD image references left in the packages" >&2
+                  exit 1
+                fi
+                grep -a -c "quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256" usr/bin/microshift
+              '
+          done

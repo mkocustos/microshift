@@ -24,7 +24,7 @@ oc_release_info() {
 
     local -r okd_image="$(jq -r --arg IMAGE "${image}" '.references.spec.tags[] | select(.name == $IMAGE) | .from.name' "${RELEASE_IMAGE_CACHE}")"
     if [ -z "${okd_image}" ] ; then
-        echo "ERROR: No OKD image found for '${image}'"
+        echo "ERROR: No image found in the release payload for '${image}'"
         exit 1
     fi
     echo "${okd_image}"
@@ -35,7 +35,7 @@ verify_okd_release() {
     local -r okd_releaseTag=$2
 
     if ! oc_release_info "${okd_url}" "${okd_releaseTag}" >/dev/null ; then
-        echo "ERROR: No OKD release found at '${okd_url}:${okd_releaseTag}'"
+        echo "ERROR: No release payload found at '${okd_url}:${okd_releaseTag}'"
         exit 1
     fi
 }

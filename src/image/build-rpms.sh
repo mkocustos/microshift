@@ -78,6 +78,7 @@ fi
 # - 4.22.7-29-gef322212c_4.22.0_okd_scos.9                for build against a release branch, 29 commits past 4.22.7.
 # - 4.21.0-202511271015-ga9cd00b34_4.21.0_okd_scos.ec.5   for build against HEAD of main which was 4.21 at the time.
 # - 4.20.0-202510201126.p0-g1c4675ace_4.20.0-okd-scos.6   for build against a specific tag.
+# - 4.22.20_202610260627.p0_g1c4675ace_ocp_4.22.20        for build against a tag with OCP_VERSION=4.22.20.
 MICROSHIFT_VERSION="${MICROSHIFT_VERSION}-g${SOURCE_GIT_COMMIT}-${OKD_VERSION_TAG}"
 # MicroShift's make-rpm.sh makes this substitution. Although we don't use the script,
 # let's do it as well for keeping the version consistent with existing downstream RPMs.
