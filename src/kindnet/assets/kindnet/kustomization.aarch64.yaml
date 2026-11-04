@@ -2,5 +2,5 @@
 images:
   - name: kindnet
     newName: docker.io/kindest/kindnetd
-    newTag: v20260820-69b56db7
+    # renovate: tag=v20260820-69b56db7 (multi-arch index digest; kustomize/CRI-O reject tag@digest)
     digest: sha256:526969f0a1a7a788a7a96f53a4ad3b51607bde7bb2841edf52a02916e8d52650

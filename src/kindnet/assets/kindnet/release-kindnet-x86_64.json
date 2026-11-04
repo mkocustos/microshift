@@ -1,5 +1,8 @@
 {
+  "release": {
+    "base": "v20260820-69b56db7"
+  },
   "images": {
-    "kindnet": "docker.io/kindest/kindnetd:v20260820-69b56db7@sha256:526969f0a1a7a788a7a96f53a4ad3b51607bde7bb2841edf52a02916e8d52650"
+    "kindnet": "docker.io/kindest/kindnetd@sha256:526969f0a1a7a788a7a96f53a4ad3b51607bde7bb2841edf52a02916e8d52650"
   }
 }

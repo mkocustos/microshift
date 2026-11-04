@@ -172,9 +172,10 @@ To update to a new version, simply re-run the generation script.
 
 > [!NOTE]
 > In the mkocustos fork the kindnetd pin is maintained by Renovate
-> (`renovate.json`): the kustomizations and release JSON files carry the tag
-> and the multi-arch index digest, and a version bump arrives as a pull request
-> without automerge. Re-running the generation script would overwrite the
+> (`renovate.json`): the image references stay digest-only (multi-arch index;
+> skopeo and CRI-O reject `tag@digest`), the tag sits in a `# renovate: tag=`
+> comment of the kustomizations and in `release.base` of the release JSON
+> files, and a version bump arrives as a pull request without automerge. Re-running the generation script would overwrite the
 > fork's own kindnet changes; bump the image through Renovate instead.
 
 Image digests are stored in release JSON files after generation:
