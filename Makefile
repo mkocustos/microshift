@@ -13,10 +13,13 @@ OKD_VERSION_STREAM ?=
 # Optional OpenShift release (e.g. '4.22.20'). When set, the SRPM embeds the
 # images of the official OpenShift payload instead of OKD.
 OCP_VERSION ?=
+# OKD tag detection only without OCP_VERSION; with it, OKD is not used.
+ifeq ($(OCP_VERSION),)
 ifeq ($(ARCH),aarch64)
 OKD_VERSION_TAG ?= $$(./src/okd/get_version.sh latest-arm64 "$(OKD_VERSION_STREAM)")
 else
 OKD_VERSION_TAG ?= $$(./src/okd/get_version.sh latest-amd64 "$(OKD_VERSION_STREAM)")
+endif
 endif
 RPM_OUTDIR ?=
 SRPM_WORKDIR ?=

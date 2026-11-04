@@ -61,8 +61,15 @@ replace_base_assets() {
         mv "${temp_json}" "${MICROSHIFT_ROOT}/assets/release/release-${ARCH}.json"
     done
 
+    # Record which payload the images belong to. MicroShift logs it at startup
+    # as its base, which would otherwise still name the upstream nightly the
+    # release JSON was generated from.
+    jq --arg b "${okd_releaseTag}" '.release.base = $b' "${MICROSHIFT_ROOT}/assets/release/release-${ARCH}.json" >"${temp_json}"
+    mv "${temp_json}" "${MICROSHIFT_ROOT}/assets/release/release-${ARCH}.json"
+
     # Update the infra pods for crio
-    local -r pod_image=$(oc_release_info "${okd_url}" "${okd_releaseTag}" "pod")
+    local pod_image
+    pod_image=$(oc_release_info "${okd_url}" "${okd_releaseTag}" "pod")
     sed -i 's,pause_image .*,pause_image = '"\"${pod_image}\""',' "${MICROSHIFT_ROOT}/packaging/crio.conf.d/10-microshift_${UNAME_TO_GOARCH_MAP[${ARCH}]}.conf"
 }
 
@@ -117,8 +124,10 @@ EOF
 
     # Add patches section for environment variables
     # Get specific images for the patches
-    local -r olm_image=$(oc_release_info "${okd_url}" "${okd_releaseTag}" "operator-lifecycle-manager")
-    local -r registry_image=$(oc_release_info "${okd_url}" "${okd_releaseTag}" "operator-registry")
+    local olm_image
+    olm_image=$(oc_release_info "${okd_url}" "${okd_releaseTag}" "operator-lifecycle-manager")
+    local registry_image
+    registry_image=$(oc_release_info "${okd_url}" "${okd_releaseTag}" "operator-registry")
 
     cat >> "${kustomization_arch_file}" <<EOF
 patches:
@@ -148,7 +157,8 @@ replace_kindnet_assets() {
     "${MICROSHIFT_ROOT}"/scripts/fetch_tools.sh yq
 
     # Kube proxy is required for kindnet
-    local -r image_with_hash=$(oc_release_info "${okd_url}" "${okd_releaseTag}" "kube-proxy")
+    local image_with_hash
+    image_with_hash=$(oc_release_info "${okd_url}" "${okd_releaseTag}" "kube-proxy")
     echo "[${ARCH}] Replacing 'kube-proxy' with '${image_with_hash}'"
     # The OKD image we retrieve is in the format quay.io/okd/scos-content@sha256:<hash>,
     # where the image name and digest (hash) are combined in a single string.
