@@ -35,6 +35,12 @@ on:
 permissions:
   contents: read
 
+# A scheduled and a manual run must not race: both would pass the duplicate
+# guard and push the same NVR into COPR twice.
+concurrency:
+  group: copr-stable
+  cancel-in-progress: false
+
 env:
   OCP_CHANNEL: stable-4.22
 
