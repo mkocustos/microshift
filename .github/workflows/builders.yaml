@@ -68,23 +68,6 @@ jobs:
           bootc-image-tag: latest
           node-count: 2
 
-  ubuntu-rpm2deb:
-    if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Check out MicroShift upstream repository
-        uses: actions/checkout@v4
-
-      - name: Detect OKD version tag
-        id: detect-okd-version
-        uses: ./.github/actions/okd-version
-
-      - name: Run the build action
-        uses: ./.github/actions/build-deb
-        with:
-          ushift-gitref: main
-          okd-version-tag: ${{ steps.detect-okd-version.outputs.okd-version-tag }}
-
   isolated-network:
     if: ${{ !github.event.pull_request.draft }}
     strategy:
