@@ -1,0 +1,45 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Private fork configuration: Renovate only tracks the kindnetd image.",
+    "Everything else in this repository follows upstream microshift-io/microshift.",
+    "No automerge: kindnet is the pod network, a merge only rebuilds the RPM in",
+    "COPR (copr-stable.yaml); the host is upgraded by hand."
+  ],
+  "baseBranchPatterns": ["copr-nightly-4x"],
+  "enabledManagers": ["kustomize", "custom.regex"],
+  "kustomize": {
+    "managerFilePatterns": ["/^src/kindnet/assets/kindnet/kustomization\\.(x86_64|aarch64)\\.yaml$/"]
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Release info of the kindnet package, kept in step with the kustomizations.",
+      "managerFilePatterns": ["/^src/kindnet/assets/kindnet/release-kindnet-(x86_64|aarch64)\\.json$/"],
+      "matchStrings": [
+        "\"kindnet\": \"(?<depName>docker\\.io/kindest/kindnetd):(?<currentValue>[^@\"]+)@(?<currentDigest>sha256:[0-9a-f]{64})\""
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Nothing but kindnetd, even where the default kustomize pattern finds other images.",
+      "matchPackageNames": ["*"],
+      "enabled": false
+    },
+    {
+      "description": "kindnetd tags are v<YYYYMMDD>-<commit>; the date is the version.",
+      "matchPackageNames": ["docker.io/kindest/kindnetd"],
+      "enabled": true,
+      "versioning": "regex:^v(?<major>\\d{8})-[0-9a-f]+$",
+      "groupName": "kindnetd",
+      "commitMessagePrefix": "kindnet:",
+      "commitMessageAction": "bump",
+      "automerge": false,
+      "pinDigests": true
+    }
+  ],
+  "dependencyDashboard": false,
+  "prHourlyLimit": 0
+}
