@@ -155,7 +155,8 @@ jobs:
 
           # Packaging inputs of THIS repo end up in the same NVR, so a change to
           # them has to trigger a rebuild on its own.
-          src_ts="$(git log -1 --format=%ct -- src/ packaging/ Makefile)"
+          # src/copr/ holds CI helpers, not packaging inputs.
+          src_ts="$(git log -1 --format=%ct -- src/ packaging/ Makefile ':!src/copr/')"
           if [ -n "${src_ts}" ] && [ "${src_ts}" -gt "${last}" ]; then
             echo "Packaging inputs changed at $(date -u -d "@${src_ts}" +%FT%TZ), after that build - rebuilding."
             echo "should-build=true" >> "${GITHUB_OUTPUT}"
