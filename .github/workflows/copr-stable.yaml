@@ -5,10 +5,14 @@ name: copr-stable
 #
 # This is NOT part of the upstream pipeline. It follows what Red Hat ships as
 # MicroShift as closely as a community build can: the openshift/microshift
-# release tag of the newest version in the stable channel, built against the
-# release payload of exactly that version. The payload metadata is public, so
-# the build needs no Red Hat credentials. Pulling the component images does:
-# the target host needs a pull secret in /etc/crio/openshift-pull-secret.
+# release tag of the newest version in the stable channel that has one, built
+# against the release payload of exactly that version. Upstream does not tag
+# every z-stream (e.g. 4.22.21 and 4.22.22 have no tag), so a newer untagged
+# version in the channel is reported and skipped, not treated as an error -
+# unless the tag in use is older than MAX_TAG_AGE_DAYS while the channel has
+# moved on. The payload metadata is public, so the build needs no Red Hat
+# credentials. Pulling the component images does: the target host needs a
+# pull secret in /etc/crio/openshift-pull-secret.
 #
 # Moving to the next minor (e.g. 4.23) is a deliberate manual change of
 # OCP_CHANNEL below, never automatic.
@@ -43,6 +47,9 @@ concurrency:
 
 env:
   OCP_CHANNEL: stable-4.22
+  # Highest age of the MicroShift tag in use while the channel already has a
+  # newer, untagged z-stream. Upstream gaps between tags reached 42 days in 4.22.
+  MAX_TAG_AGE_DAYS: "60"
 
 jobs:
   setup:
@@ -78,16 +85,58 @@ jobs:
         run: |
           set -euo pipefail
 
-          version="${INPUT_VERSION:-}"
-          if [ -z "${version}" ]; then
+          # openshift/microshift tags a release as <x.y.z>-<timestamp>.p<n>.
+          # A respin of the same version gets a higher p<n> or timestamp.
+          # Not every z-stream of the channel gets a tag.
+          semver='^[0-9]+\.[0-9]+\.[0-9]+$'
+
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            # An explicit input is the only candidate: a missing tag is an error.
+            candidates="${INPUT_VERSION}"
+          else
             # The same graph the OpenShift update service serves to clusters.
-            version="$(curl -fsSL --retry 3 -H 'Accept: application/json' \
-                         "https://api.openshift.com/api/upgrades_info/v1/graph?channel=${OCP_CHANNEL}&arch=amd64" \
-                       | jq -r '.nodes[].version' | sort -V | tail -1)"
+            # Only z-streams of the channel's own minor; moving to the next
+            # minor is a manual change of OCP_CHANNEL.
+            minor="${OCP_CHANNEL##*-}"
+            candidates="$(curl -fsSL --retry 3 -H 'Accept: application/json' \
+                            "https://api.openshift.com/api/upgrades_info/v1/graph?channel=${OCP_CHANNEL}&arch=amd64" \
+                          | jq -r '.nodes[].version' \
+                          | { grep -E "^${minor//./\\.}\.[0-9]+$" || true; } | sort -rV)"
           fi
-          if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "ERROR: no usable version in ${OCP_CHANNEL}: '${version}'" >&2
+          newest="$(printf '%s\n' "${candidates}" | head -1)"
+          if ! [[ "${newest}" =~ ${semver} ]]; then
+            echo "ERROR: no usable version in ${OCP_CHANNEL}: '${newest}'" >&2
             exit 1
+          fi
+
+          tags="$(git ls-remote --tags --refs https://github.com/openshift/microshift.git "refs/tags/${newest%.*}.*" \
+                    | awk '{print $2}' | sed 's|refs/tags/||' \
+                    | { grep -E '^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\.p[0-9]+$' || true; } | sort -V)"
+
+          # Newest candidate that has a tag.
+          version="$(printf '%s\n' "${candidates}" \
+                       | { grep -m1 -Fxf <(printf '%s\n' "${tags}" | sed 's/-.*//' | sort -u) || true; })"
+          if [ -z "${version}" ]; then
+            if [ -n "${INPUT_VERSION:-}" ]; then
+              echo "ERROR: no openshift/microshift release tag for ${INPUT_VERSION}" >&2
+            else
+              echo "ERROR: none of the $(printf '%s\n' "${candidates}" | wc -l) ${newest%.*}.z versions in ${OCP_CHANNEL} (newest ${newest}) has an openshift/microshift release tag" >&2
+            fi
+            exit 1
+          fi
+          tag="$(printf '%s\n' "${tags}" | grep -E "^${version//./\\.}-" | tail -1)"
+
+          if [ "${version}" != "${newest}" ]; then
+            # Falling behind the channel is normal for a while, but not forever:
+            # escalate once the tag in use is too old.
+            tag_date="$(sed -E 's/^[^-]+-([0-9]{8}).*/\1/' <<< "${tag}")"
+            age_days=$(( ( $(date -u +%s) - $(date -u -d "${tag_date}" +%s) ) / 86400 ))
+            msg="${OCP_CHANNEL} has ${newest}, but the newest openshift/microshift tag is for ${version} (${tag}, ${age_days} days old)"
+            if [ "${age_days}" -gt "${MAX_TAG_AGE_DAYS}" ]; then
+              echo "::error::${msg} - more than ${MAX_TAG_AGE_DAYS} days behind, check the upstream tagging."
+              exit 1
+            fi
+            echo "::notice::${msg} - using ${version}."
           fi
 
           # Both architectures must exist, the SRPM embeds the images of both.
@@ -97,17 +146,6 @@ jobs:
               exit 1
             fi
           done
-
-          # openshift/microshift tags every release as <x.y.z>-<timestamp>.p<n>.
-          # A respin of the same version gets a higher p<n> or timestamp.
-          tag="$(git ls-remote --tags --refs https://github.com/openshift/microshift.git "refs/tags/${version}-*" \
-                   | awk '{print $2}' | sed 's|refs/tags/||' \
-                   | grep -E "^${version//./\\.}-[0-9]+\.p[0-9]+$" \
-                   | sort -V | tail -1 || true)"
-          if [ -z "${tag}" ]; then
-            echo "ERROR: no openshift/microshift release tag for ${version}" >&2
-            exit 1
-          fi
 
           echo "Building MicroShift ${tag} against OpenShift ${version}"
           echo "ocp-version=${version}" >> "${GITHUB_OUTPUT}"
